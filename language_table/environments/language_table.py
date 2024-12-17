@@ -196,7 +196,7 @@ class LanguageTable(gym.Env):
     debug_info = {}
     if self._instruction is not None:
       debug_info['instruction'] = self._instruction_str
-    return add_debug_info_to_image(image, debug_info)
+    return image
 
   @property
   def succeeded(self):
