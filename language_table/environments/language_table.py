@@ -139,6 +139,23 @@ class LanguageTable(gym.Env):
     self.action_space = spaces.Box(low=-0.1, high=0.1, shape=(2,))  # x, y
     # Recreate the observation space after creating the reward.
     self.observation_space = self._create_observation_space(image_size)
+    
+  def random_move_an_object_to_random_position(self):
+    all_combinations = blocks_module.get_all_block_subsets(
+    self._block_mode, self._training)
+    combo_idx = self._rng.choice(range(len(all_combinations)))
+    blocks_on_table = all_combinations[combo_idx]
+    
+    random_block_name = self._rng.choice(blocks_on_table)
+    
+    self._reset_poses_randomly(blocks_on_table, sample_robot_pose=False, random_move_object_name=random_block_name)
+    self._blocks_on_table = blocks_on_table
+    # Recompute state to include text instruction.
+    state = self._compute_state()
+    self._previous_state = state
+    
+    observation = self._compute_observation(state=state)
+    return observation
 
   def reset(self, reset_poses = True):
     # Choose a subset of the possible blocks to be on the table.
@@ -819,14 +836,28 @@ class LanguageTable(gym.Env):
     self._instruction_str = instruction_str
     self._instruction = self.encode_instruction(self._instruction_str)
 
-  def _reset_poses_randomly(self, blocks_on_table):
+  def _reset_poses_randomly(self, blocks_on_table, sample_robot_pose=True, random_move_object_name = None):
+    if random_move_object_name is None:
+      block_position_and_orientation_before_reset = {} # if no random move object, we don't need to save the position
+    else:
+      block_position_and_orientation_before_reset = { # save the position of the objects except the random move object
+          self._block_to_pybullet_id[block]: self._pybullet_client.getBasePositionAndOrientation(
+              self._block_to_pybullet_id[block])
+          for block in blocks_on_table if block != random_move_object_name
+      }
+    
     self._pybullet_client.restoreState(self._saved_state)
     # TODO(oars): Seems like restoreState doesn't clear JointMotorControl.
 
     # Move the visible blocks off board for a bit while resetting end
     # effector.
+
+      
+    
     visible_block_ids = [self._block_to_pybullet_id[i] for i in blocks_on_table]
     for block_id in visible_block_ids:
+      if block_id in block_position_and_orientation_before_reset:
+        continue
       far_translation = np.array([5., 5., 0.])
       far_rotation = transform.Rotation.from_rotvec([np.pi / 2, 0, 0])
       self._pybullet_client.resetBasePositionAndOrientation(
@@ -842,15 +873,16 @@ class LanguageTable(gym.Env):
 
     rotation = transform.Rotation.from_rotvec([0, math.pi, 0])
 
-    # Sample random robot start pose.
-    robot_translation = self._rng.uniform(
-        low=[xmin, ymin, constants.EFFECTOR_HEIGHT],
-        high=[xmax, ymax, constants.EFFECTOR_HEIGHT])
-    robot_translation[2] = constants.EFFECTOR_HEIGHT
-    starting_pose = Pose3d(rotation=rotation, translation=robot_translation)
-    self._set_robot_target_effector_pose(starting_pose)
-    # Step simulation to move arm in place.
-    self._step_simulation_to_stabilize()
+    if sample_robot_pose:
+      # Sample random robot start pose.
+      robot_translation = self._rng.uniform(
+          low=[xmin, ymin, constants.EFFECTOR_HEIGHT],
+          high=[xmax, ymax, constants.EFFECTOR_HEIGHT])
+      robot_translation[2] = constants.EFFECTOR_HEIGHT
+      starting_pose = Pose3d(rotation=rotation, translation=robot_translation)
+      self._set_robot_target_effector_pose(starting_pose)
+      # Step simulation to move arm in place.
+      self._step_simulation_to_stabilize()
 
     # workspace bounds are
     # low=(0.15, -0.5), high=(0.7, 0.5)
@@ -870,6 +902,10 @@ class LanguageTable(gym.Env):
     # result in intersection between blocks or with the robot end effector.
     obj_translations = [self._target_effector_pose.translation]
     obj_translations = []
+    if block_position_and_orientation_before_reset:
+      for tranlation, _ in block_position_and_orientation_before_reset.values():
+        obj_translations.append(tranlation)
+    
     num_reward_attempts = 0  # 20 tries to find a valid reward.
     max_num_reward_attempts = 20
 
@@ -887,10 +923,18 @@ class LanguageTable(gym.Env):
           block_id, far_translation.tolist(),
           far_rotation.as_quat().tolist())
 
+    for block_id in block_position_and_orientation_before_reset:
+      self._pybullet_client.resetBasePositionAndOrientation(
+          block_id,
+          block_position_and_orientation_before_reset[block_id][0],
+          block_position_and_orientation_before_reset[block_id][1])
+    
     # Next find locations for the "visible" blocks on the board.
     while True:
       max_num_attempts = 20  # 20 tries to find a good pose for each block.
       for block_id in visible_block_ids:
+        if block_id in block_position_and_orientation_before_reset:
+          continue
         num_attempts = 0
         while True:
           candidate_translation, candidate_rotation = _generate_pose()
@@ -911,7 +955,10 @@ class LanguageTable(gym.Env):
           if num_attempts > max_num_attempts:
             raise ValueError('Exceeded max attempts for generating block pose.')
 
+      
+
       self._step_simulation_to_stabilize(nsteps=200)
+
 
       if self._reward_calculator is not None:
         info = self._reward_calculator.reset(
