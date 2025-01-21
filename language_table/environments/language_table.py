@@ -141,14 +141,13 @@ class LanguageTable(gym.Env):
     self.observation_space = self._create_observation_space(image_size)
     
   def random_move_an_object_to_random_position(self):
-    all_combinations = blocks_module.get_all_block_subsets(
-    self._block_mode, self._training)
+    all_combinations = blocks_module.get_all_block_subsets(self._block_mode, self._training)
     combo_idx = self._rng.choice(range(len(all_combinations)))
     blocks_on_table = all_combinations[combo_idx]
     
     random_block_name = self._rng.choice(blocks_on_table)
     
-    self._reset_poses_randomly(blocks_on_table, sample_robot_pose=False, random_move_object_name=random_block_name)
+    self._reset_poses_randomly(blocks_on_table, sample_robot_pose=False, random_move_closest_object=True)
     self._blocks_on_table = blocks_on_table
     # Recompute state to include text instruction.
     state = self._compute_state()
@@ -156,7 +155,39 @@ class LanguageTable(gym.Env):
     
     observation = self._compute_observation(state=state)
     return observation
-
+  
+  def _get_visible_object_and_arm_states(self):
+    all_combinations = blocks_module.get_all_block_subsets(self._block_mode, self._training)
+    combo_idx = self._rng.choice(range(len(all_combinations)))
+    blocks_on_table = all_combinations[combo_idx]
+    visible_states = {} # lt has invisible blocks outside the camera view
+    state = self._compute_state()
+    
+    for block_name in blocks_on_table:
+      visible_states[block_name] = {}
+      for key, value in state.items():
+        if block_name in key and 'translation' in key:
+          visible_states[block_name]['translation'] = value
+        if block_name in key and 'orientation' in key:
+          visible_states[block_name]['orientation'] = value
+    visible_states['robot_arm_translation'] = state['effector_translation']
+    return visible_states
+    
+  def _find_closest_block_to_robot_arm(self):
+    visible_states = self._get_visible_object_and_arm_states()
+    robot_arm_translation = visible_states['robot_arm_translation']
+    closest_block = None
+    closest_distance = float('inf')
+    for block_name, block_state in visible_states.items():
+      if block_name == 'robot_arm_translation':
+        continue
+      block_translation = block_state['translation']
+      distance = np.linalg.norm(np.array(block_translation) - np.array(robot_arm_translation))
+      if distance < closest_distance:
+        closest_distance = distance
+        closest_block = block_name
+    return closest_block, closest_distance
+    
   def reset(self, reset_poses = True):
     # Choose a subset of the possible blocks to be on the table.
     all_combinations = blocks_module.get_all_block_subsets(
@@ -432,6 +463,8 @@ class LanguageTable(gym.Env):
     )
     return obs
 
+    
+  
   def _compute_state(
       self,
       request_task_update=True):
@@ -835,11 +868,20 @@ class LanguageTable(gym.Env):
                        'calculator.')
     self._instruction_str = instruction_str
     self._instruction = self.encode_instruction(self._instruction_str)
+    
+  def _reset_env_by_bullet_state(self, given_state):
+    self._pybullet_client.restoreState(given_state)
+    self._step_simulation_to_stabilize()
+  
+  def _output_current_bullet_state(self):
+    return self._pybullet_client.saveState()
 
-  def _reset_poses_randomly(self, blocks_on_table, sample_robot_pose=True, random_move_object_name = None):
-    if random_move_object_name is None:
+  def _reset_poses_randomly(self, blocks_on_table, sample_robot_pose=True, random_move_closest_object = False):
+    
+    if random_move_closest_object == False:
       block_position_and_orientation_before_reset = {} # if no random move object, we don't need to save the position
     else:
+      random_move_object_name = self._find_closest_block_to_robot_arm()[0]
       block_position_and_orientation_before_reset = { # save the position of the objects except the random move object
           self._block_to_pybullet_id[block]: self._pybullet_client.getBasePositionAndOrientation(
               self._block_to_pybullet_id[block])
@@ -852,7 +894,7 @@ class LanguageTable(gym.Env):
     # Move the visible blocks off board for a bit while resetting end
     # effector.
 
-      
+    
     
     visible_block_ids = [self._block_to_pybullet_id[i] for i in blocks_on_table]
     for block_id in visible_block_ids:
@@ -888,7 +930,7 @@ class LanguageTable(gym.Env):
     # low=(0.15, -0.5), high=(0.7, 0.5)
     # or
     # low=(0.15, -0.3048), high=(0.6, 0.3048)
-    def _generate_pose():
+    def _generate_pose(xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax):
       block_translation = self._rng.uniform(
           low=[xmin, ymin, 0.0], high=[xmax, ymax, 0.0])
       block_sampled_angle = self._rng.uniform(low=0.0, high=2 * np.pi)
@@ -937,6 +979,9 @@ class LanguageTable(gym.Env):
           continue
         num_attempts = 0
         while True:
+          
+          # if move_arm_to_target_object:
+          
           candidate_translation, candidate_rotation = _generate_pose()
           if not obj_translations or min([
               np.linalg.norm(candidate_translation - p)
@@ -958,8 +1003,7 @@ class LanguageTable(gym.Env):
       
 
       self._step_simulation_to_stabilize(nsteps=200)
-
-
+      
       if self._reward_calculator is not None:
         info = self._reward_calculator.reset(
             self._compute_state(request_task_update=False),
