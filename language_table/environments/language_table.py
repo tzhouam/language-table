@@ -872,6 +872,37 @@ class LanguageTable(gym.Env):
   def _reset_env_by_bullet_state(self, given_state):
     self._pybullet_client.restoreState(given_state)
     self._step_simulation_to_stabilize()
+    
+  def _reset_env_by_visible_states(self, visible_states):
+    # Reset the robot to the visible state.
+    robot_translation = list(visible_states['robot_arm_translation'])
+    rotation = transform.Rotation.from_rotvec([0, math.pi, 0])
+    robot_translation.append(constants.EFFECTOR_HEIGHT)
+    starting_pose = Pose3d(rotation=rotation, translation=robot_translation)
+    self._set_robot_target_effector_pose(starting_pose)
+    # Step simulation to move arm in place.
+    self._step_simulation_to_stabilize()
+    
+    
+    # Reset the blocks to the visible states.
+    for block in visible_states:
+      if block == 'robot_arm_translation':
+        continue
+      block_translation = visible_states[block]['translation']
+      block_rotation = visible_states[block]['orientation']
+      
+      block_translation = list(block_translation)
+      block_translation.append(0.0)
+      block_rotation = np.array([np.pi / 2,0,block_rotation[0]])
+      # block_rotation = transform.Rotation.from_rotvec(block_rotation)
+      block_rotation = self._pybullet_client.getQuaternionFromEuler(block_rotation)
+        #block_rotation.as_quat().tolist()
+
+      self._pybullet_client.resetBasePositionAndOrientation(
+          self._block_to_pybullet_id[block],
+          block_translation,
+          block_rotation)
+
   
   def _output_current_bullet_state(self):
     return self._pybullet_client.saveState()
