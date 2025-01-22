@@ -139,15 +139,66 @@ class LanguageTable(gym.Env):
     self.action_space = spaces.Box(low=-0.1, high=0.1, shape=(2,))  # x, y
     # Recreate the observation space after creating the reward.
     self.observation_space = self._create_observation_space(image_size)
+  
+  def _check_valid_robot_arm_position(self, arm_position, visible_states):
+    for block_name, block_state in visible_states.items():
+      if block_name == 'robot_arm_translation':
+        continue
+      block_translation = block_state['translation']
+      distance = np.linalg.norm(np.array(block_translation) - np.array(arm_position[:2]))
+      if distance < constants.ARM_DISTANCE_THRESHOLD:
+        return False
+    return True
+  
+  def move_robot_arm_close_to_a_given_block(self, block_name, close_range=0.07):
+    visible_states = self._get_visible_object_and_arm_states()
+    x_center, y_center = visible_states[block_name]['translation'].tolist()
+    x_min = x_center - close_range
+    x_max = x_center + close_range
+    y_min = y_center - close_range
+    y_max = y_center + close_range
+
+    max_robot_arm_sample_steps = 100
+    successfull_move = False
+    for _ in range(max_robot_arm_sample_steps):
+      target_translation = self._rng.uniform(
+          low=[x_min, y_min, constants.EFFECTOR_HEIGHT],
+          high=[x_max, y_max, constants.EFFECTOR_HEIGHT])
+      if self._check_valid_robot_arm_position(target_translation, visible_states):
+        successfull_move = True
+        break
+    if not successfull_move:
+      return False
+
+    target_translation[2]=constants.EFFECTOR_HEIGHT
+    rotation = transform.Rotation.from_rotvec([0, math.pi, 0])
+    starting_pose = Pose3d(rotation=rotation, translation=np.array(target_translation))
+    self._set_robot_target_effector_pose(starting_pose)
+    # Step simulation to move arm in place.
+    self._step_simulation_to_stabilize()
+    self._reset_env_by_visible_states(visible_states, reset_arm=False)
+    return True
+  
+  def random_move_an_object_to_random_position(self, random_move_arm = False, move_arm_close_to_target_object=False, close_range = 0.07):
+    assert not (random_move_arm and move_arm_close_to_target_object), "Cannot have both random_move_arm and move_arm_close_to_target_object as True"
     
-  def random_move_an_object_to_random_position(self):
+    visible_states_before_move = self._get_visible_object_and_arm_states()
+    
     all_combinations = blocks_module.get_all_block_subsets(self._block_mode, self._training)
     combo_idx = self._rng.choice(range(len(all_combinations)))
     blocks_on_table = all_combinations[combo_idx]
     
-    random_block_name = self._rng.choice(blocks_on_table)
+    random_move_object_name = self._find_closest_block_to_robot_arm()[0]
     
-    self._reset_poses_randomly(blocks_on_table, sample_robot_pose=False, random_move_closest_object=True)
+    self._reset_poses_randomly(blocks_on_table, sample_robot_pose=random_move_arm, random_move_object_name=random_move_object_name)
+    
+    if move_arm_close_to_target_object:
+      while not self.move_robot_arm_close_to_a_given_block(random_move_object_name, close_range):
+        self._reset_env_by_visible_states(visible_states_before_move)
+        self._reset_poses_randomly(blocks_on_table, sample_robot_pose=random_move_arm, random_move_object_name=random_move_object_name)
+    
+    
+    
     self._blocks_on_table = blocks_on_table
     # Recompute state to include text instruction.
     state = self._compute_state()
@@ -873,15 +924,16 @@ class LanguageTable(gym.Env):
     self._pybullet_client.restoreState(given_state)
     self._step_simulation_to_stabilize()
     
-  def _reset_env_by_visible_states(self, visible_states):
-    # Reset the robot to the visible state.
-    robot_translation = list(visible_states['robot_arm_translation'])
-    rotation = transform.Rotation.from_rotvec([0, math.pi, 0])
-    robot_translation.append(constants.EFFECTOR_HEIGHT)
-    starting_pose = Pose3d(rotation=rotation, translation=robot_translation)
-    self._set_robot_target_effector_pose(starting_pose)
-    # Step simulation to move arm in place.
-    self._step_simulation_to_stabilize()
+  def _reset_env_by_visible_states(self, visible_states, reset_arm = True):
+    if reset_arm:
+      # Reset the robot to the visible state.
+      robot_translation = list(visible_states['robot_arm_translation'])
+      rotation = transform.Rotation.from_rotvec([0, math.pi, 0])
+      robot_translation.append(constants.EFFECTOR_HEIGHT)
+      starting_pose = Pose3d(rotation=rotation, translation=robot_translation)
+      self._set_robot_target_effector_pose(starting_pose)
+      # Step simulation to move arm in place.
+      self._step_simulation_to_stabilize()
     
     
     # Reset the blocks to the visible states.
@@ -907,12 +959,13 @@ class LanguageTable(gym.Env):
   def _output_current_bullet_state(self):
     return self._pybullet_client.saveState()
 
-  def _reset_poses_randomly(self, blocks_on_table, sample_robot_pose=True, random_move_closest_object = False):
+
+  
+  def _reset_poses_randomly(self, blocks_on_table, sample_robot_pose=True, random_move_object_name = None):
     
-    if random_move_closest_object == False:
+    if random_move_object_name is None:
       block_position_and_orientation_before_reset = {} # if no random move object, we don't need to save the position
     else:
-      random_move_object_name = self._find_closest_block_to_robot_arm()[0]
       block_position_and_orientation_before_reset = { # save the position of the objects except the random move object
           self._block_to_pybullet_id[block]: self._pybullet_client.getBasePositionAndOrientation(
               self._block_to_pybullet_id[block])
@@ -961,6 +1014,8 @@ class LanguageTable(gym.Env):
     # low=(0.15, -0.5), high=(0.7, 0.5)
     # or
     # low=(0.15, -0.3048), high=(0.6, 0.3048)
+    
+    
     def _generate_pose(xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax):
       block_translation = self._rng.uniform(
           low=[xmin, ymin, 0.0], high=[xmax, ymax, 0.0])
