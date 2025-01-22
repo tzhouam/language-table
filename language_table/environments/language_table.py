@@ -156,6 +156,16 @@ class LanguageTable(gym.Env):
     observation = self._compute_observation(state=state)
     return observation
   
+  def reset_env_by_object_and_arm_states(self, object_states):
+    return self._reset_env_by_visible_states(object_states)
+
+  def get_object_and_arm_states(self):
+    '''
+    To external users of the env, the inivisible objects are never exposed, 
+    so no need to include the 'visible' in the function name
+    '''
+    return self._get_visible_object_and_arm_states()
+
   def _get_visible_object_and_arm_states(self):
     all_combinations = blocks_module.get_all_block_subsets(self._block_mode, self._training)
     combo_idx = self._rng.choice(range(len(all_combinations)))
