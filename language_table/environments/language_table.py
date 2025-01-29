@@ -190,12 +190,14 @@ class LanguageTable(gym.Env):
     
     random_move_object_name = self._find_closest_block_to_robot_arm()[0]
     
-    self._reset_poses_randomly(blocks_on_table, sample_robot_pose=random_move_arm, random_move_object_name=random_move_object_name)
+    
+    robot_pose_mode = 'fixed' if not random_move_arm else 'random'
+    self._reset_poses_randomly(blocks_on_table, robot_pose_mode=robot_pose_mode, random_move_object_name=random_move_object_name)
     
     if move_arm_close_to_target_object:
       while not self.move_robot_arm_close_to_a_given_block(random_move_object_name, close_range):
         self._reset_env_by_visible_states(visible_states_before_move)
-        self._reset_poses_randomly(blocks_on_table, sample_robot_pose=random_move_arm, random_move_object_name=random_move_object_name)
+        self._reset_poses_randomly(blocks_on_table, robot_pose_mode=robot_pose_mode, random_move_object_name=random_move_object_name)
     
     
     
@@ -249,7 +251,7 @@ class LanguageTable(gym.Env):
         closest_block = block_name
     return closest_block, closest_distance
     
-  def reset(self, reset_poses = True):
+  def reset(self, reset_poses = True, robot_pose_mode = 'random'):
     # Choose a subset of the possible blocks to be on the table.
     all_combinations = blocks_module.get_all_block_subsets(
         self._block_mode, self._training)
@@ -257,7 +259,7 @@ class LanguageTable(gym.Env):
     blocks_on_table = all_combinations[combo_idx]
 
     if reset_poses:
-      self._reset_poses_randomly(blocks_on_table)
+      self._reset_poses_randomly(blocks_on_table, robot_pose_mode=robot_pose_mode)
 
     self._blocks_on_table = blocks_on_table
     # Recompute state to include text instruction.
@@ -970,8 +972,35 @@ class LanguageTable(gym.Env):
     return self._pybullet_client.saveState()
 
 
+  def random_move_robot_arm(self):
+    xmin, ymin = (constants.X_MIN + constants.WORKSPACE_BOUNDS_BUFFER,
+            constants.Y_MIN + constants.WORKSPACE_BOUNDS_BUFFER)
+    xmax, ymax = (constants.X_MAX - constants.WORKSPACE_BOUNDS_BUFFER,
+                  constants.Y_MAX - constants.WORKSPACE_BOUNDS_BUFFER)
+    while True:
+      rotation = transform.Rotation.from_rotvec([0, math.pi, 0])
+      robot_translation = self._rng.uniform(
+      low=[xmin, ymin, constants.EFFECTOR_HEIGHT],
+      high=[xmax, ymax, constants.EFFECTOR_HEIGHT])
+      robot_translation[2] = constants.EFFECTOR_HEIGHT
+      
+      visible_states = self.get_object_and_arm_states()
+      all_fit = True
+      for object_name in visible_states.keys():
+        if 'arm' not in object_name and np.linalg.norm(visible_states[object_name]['translation'][:2] -
+                          robot_translation[:2]) < constants.ARM_DISTANCE_THRESHOLD:
+          all_fit = False
+      if all_fit:
+        break
+    
+    
+    starting_pose = Pose3d(rotation=rotation, translation=robot_translation)
+    self._set_robot_target_effector_pose(starting_pose)
+    # Step simulation to move arm in place.
+    self._step_simulation_to_stabilize()
+
   
-  def _reset_poses_randomly(self, blocks_on_table, sample_robot_pose=True, random_move_object_name = None):
+  def _reset_poses_randomly(self, blocks_on_table, robot_pose_mode='random', random_move_object_name = None):
     
     if random_move_object_name is None:
       block_position_and_orientation_before_reset = {} # if no random move object, we don't need to save the position
@@ -1009,7 +1038,7 @@ class LanguageTable(gym.Env):
 
     rotation = transform.Rotation.from_rotvec([0, math.pi, 0])
 
-    if sample_robot_pose:
+    if robot_pose_mode=='random':
       # Sample random robot start pose.
       robot_translation = self._rng.uniform(
           low=[xmin, ymin, constants.EFFECTOR_HEIGHT],
@@ -1019,6 +1048,17 @@ class LanguageTable(gym.Env):
       self._set_robot_target_effector_pose(starting_pose)
       # Step simulation to move arm in place.
       self._step_simulation_to_stabilize()
+    elif robot_pose_mode=='fixed':
+      pass
+    elif robot_pose_mode=='top_right':
+      #move the robot to the top_right corner
+      robot_translation = [xmin, ymax, constants.EFFECTOR_HEIGHT]
+      starting_pose = Pose3d(rotation=rotation, translation=robot_translation)
+      self._set_robot_target_effector_pose(starting_pose)
+      # Step simulation to move arm in place.
+      self._step_simulation_to_stabilize()
+    else:
+      raise ValueError('robot_pose_mode should be random, fixed or top_right')
 
     # workspace bounds are
     # low=(0.15, -0.5), high=(0.7, 0.5)
